@@ -1,4 +1,8 @@
 ---
+- name: sm_status_report - docker_role_started
+  debug:
+    msg: "docker_role_started"
+
 - name: resolve platform specific vars
   include_vars: "{{item}}"
   with_first_found:
@@ -6,48 +10,26 @@
     - "{{ansible_distribution}}.yml"
     - "{{ansible_os_family}}.yml"
 
-- name: Install curl
-  package: name=curl state=present
-
-- name: install utils for fiddling with ethernet bridges...
-  become: yes
-  become_user: root
-  with_items:
-    - bridge-utils
-  package: name={{item}} state=present
-  when: docker_network_bridge
-
-- name: install docker using installer from get.docker.com
-  shell: curl -s -L {{docker_mirror}} | sh
-  args:
-    creates: /usr/bin/docker
-  when: docker_install_method == 'installer'
-
-- name: install docker using package
-  package: name="{{ docker_package_name }}" state=installed
-  when: docker_install_method == 'package'
-
-- name: Added OPTIONS to docker start in case of using installer
-  ini_file: dest="{{ item }}"
-            section=Service option=ExecStart
-            value="/usr/bin/dockerd ${{ docker_options_var }}"
-  with_first_found:
-    - /usr/lib/systemd/system/docker.service
-    - /lib/systemd/system/docker.service
-  register: docker_opt
-  when: ansible_service_mgr == "systemd" and docker_install_method == 'installer'
+- name: Include docker_install_method specific code
+  include: "{{ docker_install_method }}.yml"
 
 - name: Adding EnvironmentFile to docker systemd file
   #EnvironmentFile=-/etc/sysconfig/docker
-  ini_file: dest="{{ item }}"
-            section=Service option=EnvironmentFile
-            value="{{ docker_env_file }}"
-  with_first_found:
-    - /usr/lib/systemd/system/docker.service
-    - /lib/systemd/system/docker.service
-  register: docker_envfile
+  ini_file: dest=/usr/lib/systemd/system/docker.service section=Service option=EnvironmentFile value="{{ docker_env_file }}" create=no
   when: ansible_service_mgr == "systemd"
-  notify: restart docker
+  ignore_errors: yes
+  notify:
+    - reload systemd
+    - restart docker
+
+- name: Adding EnvironmentFile to docker systemd file
+  #EnvironmentFile=-/etc/sysconfig/docker
+  ini_file: dest=/lib/systemd/system/docker.service section=Service option=EnvironmentFile value="{{ docker_env_file }}" create=no
+  when: ansible_service_mgr == "systemd"
+  ignore_errors: yes
+  notify:
+    - reload systemd
+    - restart docker
 
 - name: Adding DOCKER OPTIONS for docker init scripts
   lineinfile: dest="{{ docker_env_file }}"
@@ -56,10 +38,35 @@
               state=present
               create=yes
   notify: restart docker
+  when: ansible_os_family == 'Debian' or ansible_distribution == 'CentOS'
 
-- name: reload systemd config
-  command: /bin/systemctl daemon-reload
-  when: docker_envfile.changed or docker_opt.changed
+- name: Added OPTIONS to docker start in /usr/lib/systemd/system/docker.service
+  ini_file: dest=/usr/lib/systemd/system/docker.service section=Service option=ExecStart value="/usr/bin/dockerd ${{ docker_options_var }}" create=no
+  ignore_errors: yes
+  when: ansible_service_mgr == "systemd"
+  notify:
+    - reload systemd
+    - restart docker
+
+- name: Added OPTIONS to docker start in /lib/systemd/system/docker.service
+  ini_file: dest=/lib/systemd/system/docker.service section=Service option=ExecStart value="/usr/bin/dockerd ${{ docker_options_var }}" create=no
+  ignore_errors: yes
+  when: ansible_service_mgr == "systemd"
+  notify:
+    - reload systemd
+    - restart docker
+
+
+- name: Adding Docker Insecure registries in RedHat
+  lineinfile: dest="{{ docker_env_file }}"
+              line="{{docker_opts_RedHat}}"
+              regexp="^{{docker_opts_RedHat}}"
+              state=present
+              create=yes
+  notify: restart docker
+  when:
+    - ansible_os_family == 'RedHat'
+    - ansible_distribution == 'RedHat'
 
 - name: create root user docker config directory
   become: yes
@@ -99,3 +106,8 @@
   service: name=docker state=started enabled=yes
 
 - meta: flush_handlers
+
+- name: sm_status_report - docker_role_completed
+  debug:
+    msg: "docker_role_completed"
+
